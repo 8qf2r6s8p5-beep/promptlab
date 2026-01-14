@@ -625,3 +625,4 @@ app.listen(PORT, () => {
     // Iniciar processador de mensagens agendadas
     processScheduledMessages();
 });
+// Force redeploy Wed Jan 14 21:49:30 WET 2026
