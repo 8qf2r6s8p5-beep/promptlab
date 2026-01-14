@@ -300,23 +300,38 @@ app.post('/send', async (req, res) => {
         const chatId = cleanNumber + '@c.us';
         console.log(`[WA] Tentando enviar para: ${chatId}`);
 
-        // Enviar mensagem de forma simples
-        const result = await session.client.sendMessage(chatId, message);
-        console.log(`[WA] Mensagem enviada! ID: ${result.id._serialized}`);
+        // Enviar mensagem com tratamento especial para o bug markedUnread
+        let result;
+        let messageSent = false;
+        try {
+            result = await session.client.sendMessage(chatId, message);
+            messageSent = true;
+            console.log(`[WA] Mensagem enviada! ID: ${result.id._serialized}`);
+        } catch (sendErr) {
+            // Verificar se é o bug markedUnread (mensagem foi enviada mas sendSeen falhou)
+            if (sendErr.message && sendErr.message.includes('markedUnread')) {
+                console.log(`[WA] Bug markedUnread ignorado - mensagem foi enviada`);
+                messageSent = true;
+            } else {
+                throw sendErr;
+            }
+        }
 
-        // Guardar mensagem enviada no Supabase
-        await supabase
-            .from('whatsapp_messages')
-            .insert({
-                user_id: userId,
-                from_number: session.phone,
-                to_number: cleanNumber,
-                body: message,
-                type: 'sent',
-                timestamp: new Date().toISOString()
-            });
+        if (messageSent) {
+            // Guardar mensagem enviada no Supabase
+            await supabase
+                .from('whatsapp_messages')
+                .insert({
+                    user_id: userId,
+                    from_number: session.phone,
+                    to_number: cleanNumber,
+                    body: message,
+                    type: 'sent',
+                    timestamp: new Date().toISOString()
+                });
 
-        res.json({ success: true, message: 'Mensagem enviada!' });
+            res.json({ success: true, message: 'Mensagem enviada!' });
+        }
 
     } catch (err) {
         console.error(`[API] Erro ao enviar:`, err);
