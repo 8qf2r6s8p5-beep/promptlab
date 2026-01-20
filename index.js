@@ -220,7 +220,7 @@ function formatKnowledgeContext(knowledge) {
 /**
  * Chamar a AI para gerar resposta
  */
-async function getAIResponse(userId, contactNumber, userMessage) {
+async function getAIResponse(userId, contactNumber, userMessage, contactName = 'Cliente') {
     const settings = userAISettings.get(userId);
     if (!settings || !settings.enabled) {
         return null;
@@ -259,14 +259,20 @@ Se o horário não estiver disponível, sugira alternativas baseadas na agenda.`
         // Instruções de agendamento - SEMPRE incluídas
         const appointmentInstructions = `
 
+INFORMAÇÃO DO CLIENTE ATUAL:
+- Nome do cliente: ${contactName}
+- Telefone: ${contactNumber}
+
 AGENDAMENTOS (IMPORTANTE - Siga este formato EXATAMENTE):
 Você pode agendar compromissos quando o cliente solicitar. Verifique a disponibilidade na agenda antes de confirmar.
 Para criar um agendamento, responda com o formato especial no FINAL da sua mensagem:
 [AGENDAR: YYYY-MM-DD HH:MM duração_minutos "Nome do Cliente" "notas opcionais"]
 
-Exemplo: Se o cliente pedir para agendar dia 20 de janeiro às 14h:
+IMPORTANTE: Use o nome REAL do cliente (${contactName}) no agendamento, NÃO use "Cliente" genérico.
+
+Exemplo para este cliente:
 "Perfeito! Vou agendar para dia 20 de janeiro às 14:00. Confirmo o agendamento!
-[AGENDAR: 2026-01-20 14:00 60 "João Silva" "Agendado via WhatsApp"]"
+[AGENDAR: 2026-01-20 14:00 60 "${contactName}" "Agendado via WhatsApp"]"
 
 ATENÇÃO: O formato [AGENDAR: ...] é OBRIGATÓRIO para criar agendamentos. Sem ele, o agendamento NÃO será criado.
 Se o horário não estiver disponível, sugira alternativas baseadas na agenda.`;
@@ -496,7 +502,19 @@ function getOrCreateClient(userId) {
         }
 
         const contactNumber = message.from.replace('@c.us', '');
-        console.log(`[WA ${userId}] Mensagem recebida de ${contactNumber}: ${message.body}`);
+
+        // Obter nome do contacto do WhatsApp
+        let contactName = 'Cliente';
+        try {
+            const contact = await message.getContact();
+            if (contact) {
+                contactName = contact.pushname || contact.name || contact.shortName || 'Cliente';
+            }
+        } catch (e) {
+            console.log(`[WA ${userId}] Não foi possível obter nome do contacto`);
+        }
+
+        console.log(`[WA ${userId}] Mensagem recebida de ${contactName} (${contactNumber}): ${message.body}`);
 
         // Guardar mensagem no Supabase
         await saveIncomingMessage(userId, message);
@@ -508,8 +526,8 @@ function getOrCreateClient(userId) {
             console.log(`[AI ${userId}] AI auto-reply ativo, a processar mensagem...`);
 
             try {
-                // Obter resposta da AI
-                const aiReply = await getAIResponse(userId, contactNumber, message.body);
+                // Obter resposta da AI (passa nome do contacto)
+                const aiReply = await getAIResponse(userId, contactNumber, message.body, contactName);
 
                 if (aiReply) {
                     // Enviar resposta via WhatsApp
