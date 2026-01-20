@@ -73,6 +73,33 @@ async function getUserFeedPosts(userId) {
 }
 
 /**
+ * Buscar horários de trabalho/disponibilidade do utilizador
+ */
+async function getUserBusinessHours(userId) {
+    try {
+        const { data, error } = await supabase
+            .from('profiles')
+            .select('availability_hour_open, availability_hour_close, business_hour_open, business_hour_close')
+            .eq('id', userId)
+            .single();
+
+        if (error) {
+            console.error(`[AI] Error fetching business hours:`, error);
+            return { open: 9, close: 18 }; // Default
+        }
+
+        // Priorizar availability_hour, senão usar business_hour
+        const open = data.availability_hour_open ?? data.business_hour_open ?? 9;
+        const close = data.availability_hour_close ?? data.business_hour_close ?? 18;
+
+        return { open, close };
+    } catch (err) {
+        console.error(`[AI] Error fetching business hours:`, err);
+        return { open: 9, close: 18 };
+    }
+}
+
+/**
  * Buscar agenda de disponibilidades do utilizador
  */
 async function getUserAvailability(userId) {
@@ -115,19 +142,21 @@ async function getUserKnowledge(userId) {
     }
 
     // Buscar dados frescos
-    const [posts, agenda] = await Promise.all([
+    const [posts, agenda, businessHours] = await Promise.all([
         getUserFeedPosts(userId),
-        getUserAvailability(userId)
+        getUserAvailability(userId),
+        getUserBusinessHours(userId)
     ]);
 
     const knowledge = {
         posts,
         agenda,
+        businessHours,
         lastUpdated: now
     };
 
     userKnowledgeCache.set(userId, knowledge);
-    console.log(`[AI] Knowledge cache updated for user ${userId}: ${posts.length} posts, ${agenda.length} events`);
+    console.log(`[AI] Knowledge cache updated for user ${userId}: ${posts.length} posts, ${agenda.length} events, hours: ${businessHours.open}h-${businessHours.close}h`);
 
     return knowledge;
 }
@@ -138,6 +167,14 @@ async function getUserKnowledge(userId) {
  */
 function formatKnowledgeContext(knowledge) {
     let context = '';
+
+    // Formatar horários de trabalho/disponibilidade
+    if (knowledge.businessHours) {
+        const { open, close } = knowledge.businessHours;
+        context += `\n\n=== HORÁRIO DE ATENDIMENTO ===\n`;
+        context += `Atendimento disponível das ${String(open).padStart(2, '0')}:00 às ${String(close).padStart(2, '0')}:00.\n`;
+        context += `NÃO agende fora deste horário. Se o cliente pedir horário fora do expediente, sugira alternativas dentro do horário de atendimento.\n`;
+    }
 
     // Formatar posts do feed (modo eficiência - apenas título e sumário)
     if (knowledge.posts && knowledge.posts.length > 0) {
@@ -152,9 +189,10 @@ function formatKnowledgeContext(knowledge) {
         });
     }
 
-    // Formatar agenda de disponibilidades
+    // Formatar agenda de disponibilidades (eventos já agendados)
     if (knowledge.agenda && knowledge.agenda.length > 0) {
-        context += '\n\n=== AGENDA (Próximos 7 dias) ===\n';
+        context += '\n\n=== AGENDA - HORÁRIOS JÁ OCUPADOS (Próximos 7 dias) ===\n';
+        context += 'Estes horários já estão reservados e NÃO estão disponíveis:\n';
         knowledge.agenda.forEach(event => {
             const date = new Date(event.date).toLocaleDateString('pt-PT', { weekday: 'short', day: 'numeric', month: 'short' });
             context += `• ${date}: ${event.client_name || event.type}`;
@@ -173,7 +211,7 @@ function formatKnowledgeContext(knowledge) {
             context += '\n';
         });
     } else {
-        context += '\n\n=== AGENDA ===\nSem eventos agendados.\n';
+        context += '\n\n=== AGENDA ===\nSem eventos agendados - todos os horários dentro do expediente estão livres.\n';
     }
 
     return context;
