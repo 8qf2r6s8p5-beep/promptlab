@@ -46,7 +46,7 @@ const MAX_HISTORY_MESSAGES = 10; // Máximo de mensagens no histórico por conve
 
 // Cache de conhecimento do utilizador (posts + agenda) - atualizado periodicamente
 const userKnowledgeCache = new Map(); // userId -> { posts, agenda, lastUpdated }
-const KNOWLEDGE_CACHE_TTL = 5 * 60 * 1000; // 5 minutos
+const KNOWLEDGE_CACHE_TTL = 60 * 1000; // 1 minuto - refresh mais frequente para disponibilidades
 
 /**
  * Buscar posts do feed do utilizador (base de conhecimento)
@@ -100,9 +100,9 @@ async function getUserBusinessHours(userId) {
 }
 
 /**
- * Buscar agenda de disponibilidades do utilizador
+ * Buscar agendamentos existentes do utilizador
  */
-async function getUserAvailability(userId) {
+async function getUserAppointments(userId) {
     try {
         // Buscar eventos da agenda (próximos 7 dias)
         const now = new Date();
@@ -118,13 +118,51 @@ async function getUserAvailability(userId) {
             .order('start_time', { ascending: true });
 
         if (error) {
-            console.error(`[AI] Error fetching agenda:`, error);
+            console.error(`[AI] Error fetching appointments:`, error);
             return [];
         }
 
         return data || [];
     } catch (err) {
-        console.error(`[AI] Error fetching agenda:`, err);
+        console.error(`[AI] Error fetching appointments:`, err);
+        return [];
+    }
+}
+
+/**
+ * Buscar slots de disponibilidade da tabela agenda_availability
+ * Retorna APENAS os horários marcados como DISPONÍVEIS
+ * O AI SÓ pode agendar em horários explicitamente marcados como disponíveis
+ */
+async function getUserAvailableSlots(userId) {
+    try {
+        const now = new Date();
+        const weekFromNow = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+        // Gerar lista de datas para os próximos 7 dias
+        const dates = [];
+        for (let d = new Date(now); d <= weekFromNow; d.setDate(d.getDate() + 1)) {
+            const dateStr = d.toISOString().split('T')[0];
+            dates.push(dateStr);
+        }
+
+        const { data, error } = await supabase
+            .from('agenda_availability')
+            .select('date, hour, available')
+            .eq('user_id', userId)
+            .in('date', dates);
+
+        if (error) {
+            console.error(`[AI] Error fetching availability slots:`, error);
+            return [];
+        }
+
+        // Filtrar APENAS os horários marcados como DISPONÍVEIS (available = true)
+        const available = (data || []).filter(slot => slot.available === true);
+
+        return available;
+    } catch (err) {
+        console.error(`[AI] Error fetching availability slots:`, err);
         return [];
     }
 }
@@ -141,22 +179,31 @@ async function getUserKnowledge(userId) {
         return cached;
     }
 
-    // Buscar dados frescos
-    const [posts, agenda, businessHours] = await Promise.all([
+    // Buscar dados frescos (slots disponíveis da agenda de disponibilidades)
+    const [posts, appointments, availableSlots, businessHours] = await Promise.all([
         getUserFeedPosts(userId),
-        getUserAvailability(userId),
+        getUserAppointments(userId),
+        getUserAvailableSlots(userId),
         getUserBusinessHours(userId)
     ]);
 
     const knowledge = {
         posts,
-        agenda,
+        appointments,
+        availableSlots,
         businessHours,
         lastUpdated: now
     };
 
     userKnowledgeCache.set(userId, knowledge);
-    console.log(`[AI] Knowledge cache updated for user ${userId}: ${posts.length} posts, ${agenda.length} events, hours: ${businessHours.open}h-${businessHours.close}h`);
+    console.log(`[AI] Knowledge cache updated for user ${userId}: ${posts.length} posts, ${appointments.length} appointments, ${availableSlots.length} available slots, hours: ${businessHours.open}h-${businessHours.close}h`);
+
+    // Debug: mostrar slots disponíveis
+    if (availableSlots.length > 0) {
+        console.log(`[AI] Available slots for ${userId}:`, availableSlots.map(s => `${s.date} ${s.hour}:00`).join(', '));
+    } else {
+        console.log(`[AI] WARNING: No available slots found for user ${userId}`);
+    }
 
     return knowledge;
 }
@@ -189,29 +236,59 @@ function formatKnowledgeContext(knowledge) {
         });
     }
 
-    // Formatar agenda de disponibilidades (eventos já agendados)
-    if (knowledge.agenda && knowledge.agenda.length > 0) {
-        context += '\n\n=== AGENDA - HORÁRIOS JÁ OCUPADOS (Próximos 7 dias) ===\n';
-        context += 'Estes horários já estão reservados e NÃO estão disponíveis:\n';
-        knowledge.agenda.forEach(event => {
+    // Formatar slots DISPONÍVEIS (da tabela agenda_availability)
+    // O AI SÓ pode agendar em horários que aparecem nesta lista
+    if (knowledge.availableSlots && knowledge.availableSlots.length > 0) {
+        context += '\n\n=== HORÁRIOS DISPONÍVEIS PARA AGENDAMENTO (Próximos 7 dias) ===\n';
+        context += 'REGRA CRÍTICA E OBRIGATÓRIA:\n';
+        context += '- Você SÓ pode sugerir/agendar nos horários EXATOS listados abaixo\n';
+        context += '- NUNCA invente ou sugira horários que NÃO aparecem nesta lista\n';
+        context += '- Se o cliente pedir um horário que não está na lista, diga que não está disponível e mostre APENAS os horários da lista abaixo\n\n';
+
+        // Agrupar por data para melhor visualização
+        const byDate = {};
+        knowledge.availableSlots.forEach(slot => {
+            if (!byDate[slot.date]) byDate[slot.date] = [];
+            byDate[slot.date].push(slot.hour);
+        });
+
+        // Também remover horários que já têm agendamentos
+        if (knowledge.appointments && knowledge.appointments.length > 0) {
+            knowledge.appointments.forEach(apt => {
+                if (byDate[apt.date] && apt.start_time) {
+                    const aptHour = parseInt(apt.start_time.split(':')[0]);
+                    const idx = byDate[apt.date].indexOf(aptHour);
+                    if (idx !== -1) {
+                        byDate[apt.date].splice(idx, 1);
+                    }
+                }
+            });
+        }
+
+        Object.keys(byDate).sort().forEach(date => {
+            if (byDate[date].length > 0) {
+                const dateObj = new Date(date);
+                const dateStr = dateObj.toLocaleDateString('pt-PT', { weekday: 'long', day: 'numeric', month: 'long' });
+                const hours = byDate[date].sort((a, b) => a - b).map(h => `${String(h).padStart(2, '0')}:00`).join(', ');
+                context += `• ${dateStr}: ${hours}\n`;
+            }
+        });
+    } else {
+        context += '\n\n=== DISPONIBILIDADE ===\n';
+        context += 'ATENÇÃO: Não há horários marcados como disponíveis na agenda. Informe o cliente que não há disponibilidade no momento e peça para entrar em contacto mais tarde.\n';
+    }
+
+    // Formatar agendamentos existentes (informativo)
+    if (knowledge.appointments && knowledge.appointments.length > 0) {
+        context += '\n\n=== AGENDAMENTOS JÁ CONFIRMADOS ===\n';
+        knowledge.appointments.forEach(event => {
             const date = new Date(event.date).toLocaleDateString('pt-PT', { weekday: 'short', day: 'numeric', month: 'short' });
             context += `• ${date}: ${event.client_name || event.type}`;
             if (event.start_time) {
-                context += ` (${event.start_time}`;
-                if (event.duration) {
-                    // Calcular hora de fim baseada na duração
-                    const [h, m] = event.start_time.split(':').map(Number);
-                    const endMinutes = h * 60 + m + event.duration;
-                    const endH = Math.floor(endMinutes / 60);
-                    const endM = endMinutes % 60;
-                    context += `-${String(endH).padStart(2, '0')}:${String(endM).padStart(2, '0')}`;
-                }
-                context += ')';
+                context += ` às ${event.start_time}`;
             }
             context += '\n';
         });
-    } else {
-        context += '\n\n=== AGENDA ===\nSem eventos agendados - todos os horários dentro do expediente estão livres.\n';
     }
 
     return context;
@@ -1501,3 +1578,4 @@ app.listen(PORT, async () => {
 // Force redeploy Wed Jan 14 21:49:30 WET 2026
 // Forced rebuild Wed Jan 14 22:04:08 WET 2026
 // Deploy Tue Jan 20 00:37:07 WET 2026
+// Deploy Mon Jan 20 07:00:00 WET 2026 - AI only books on AVAILABLE slots, stricter instructions
