@@ -149,12 +149,13 @@ async function getUserAvailableSlots(userId) {
             dates.push(dateStr);
         }
 
+        console.log(`[AI] Searching availability for user ${userId}, dates: ${dates.join(', ')}`);
+
         // Estrutura real: uma linha por hora com colunas date, hour, available
         const { data, error } = await supabase
             .from('agenda_availability')
             .select('date, hour, available')
             .eq('user_id', userId)
-            .eq('available', true)
             .in('date', dates);
 
         if (error) {
@@ -162,14 +163,18 @@ async function getUserAvailableSlots(userId) {
             return [];
         }
 
-        // Dados já vêm filtrados (available = true)
-        const availableSlots = (data || []).map(row => ({
-            date: row.date,
-            hour: row.hour,
-            available: true
-        }));
+        console.log(`[AI] Raw data from agenda_availability: ${JSON.stringify(data)}`);
 
-        console.log(`[AI] Found ${availableSlots.length} available slots for next 7 days`);
+        // Filtrar apenas os disponíveis
+        const availableSlots = (data || [])
+            .filter(row => row.available === true)
+            .map(row => ({
+                date: row.date,
+                hour: row.hour,
+                available: true
+            }));
+
+        console.log(`[AI] Found ${availableSlots.length} available slots out of ${(data || []).length} total rows`);
         return availableSlots;
     } catch (err) {
         console.error(`[AI] Error fetching availability slots:`, err);
@@ -285,21 +290,11 @@ function formatKnowledgeContext(knowledge) {
         });
     } else {
         context += '\n\n=== DISPONIBILIDADE ===\n';
-        context += 'ATENÇÃO: Não há horários marcados como disponíveis na agenda. Informe o cliente que não há disponibilidade no momento e peça para entrar em contacto mais tarde.\n';
+        context += 'ATENÇÃO: Não há horários marcados como disponíveis na agenda de disponibilidades. Informe o cliente que não há disponibilidade no momento e peça para entrar em contacto mais tarde ou ligar diretamente.\n';
     }
 
-    // Formatar agendamentos existentes (informativo)
-    if (knowledge.appointments && knowledge.appointments.length > 0) {
-        context += '\n\n=== AGENDAMENTOS JÁ CONFIRMADOS ===\n';
-        knowledge.appointments.forEach(event => {
-            const date = new Date(event.date).toLocaleDateString('pt-PT', { weekday: 'short', day: 'numeric', month: 'short' });
-            context += `• ${date}: ${event.client_name || event.type}`;
-            if (event.start_time) {
-                context += ` às ${event.start_time}`;
-            }
-            context += '\n';
-        });
-    }
+    // NÃO mostrar agendamentos ao cliente - são informação privada
+    // Os agendamentos já foram usados acima para remover slots ocupados da lista de disponíveis
 
     return context;
 }
