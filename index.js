@@ -55,7 +55,7 @@ const KNOWLEDGE_CACHE_TTL = 5 * 60 * 1000; // 5 minutos
 async function getUserFeedPosts(userId) {
     try {
         const { data, error } = await supabase
-            .from('articles')
+            .from('posts')
             .select('title, summary, content')
             .eq('user_id', userId)
             .order('created_at', { ascending: false });
@@ -82,8 +82,8 @@ async function getUserAvailability(userId) {
         const weekFromNow = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
 
         const { data, error } = await supabase
-            .from('agenda_events')
-            .select('title, date, start_time, end_time, type, notes')
+            .from('appointments')
+            .select('client_name, date, start_time, duration, type, notes')
             .eq('user_id', userId)
             .gte('date', now.toISOString().split('T')[0])
             .lte('date', weekFromNow.toISOString().split('T')[0])
@@ -157,10 +157,17 @@ function formatKnowledgeContext(knowledge) {
         context += '\n\n=== AGENDA (Próximos 7 dias) ===\n';
         knowledge.agenda.forEach(event => {
             const date = new Date(event.date).toLocaleDateString('pt-PT', { weekday: 'short', day: 'numeric', month: 'short' });
-            context += `• ${date}: ${event.title || event.type}`;
+            context += `• ${date}: ${event.client_name || event.type}`;
             if (event.start_time) {
                 context += ` (${event.start_time}`;
-                if (event.end_time) context += `-${event.end_time}`;
+                if (event.duration) {
+                    // Calcular hora de fim baseada na duração
+                    const [h, m] = event.start_time.split(':').map(Number);
+                    const endMinutes = h * 60 + m + event.duration;
+                    const endH = Math.floor(endMinutes / 60);
+                    const endM = endMinutes % 60;
+                    context += `-${String(endH).padStart(2, '0')}:${String(endM).padStart(2, '0')}`;
+                }
                 context += ')';
             }
             context += '\n';
@@ -209,10 +216,17 @@ Exemplo: Se o cliente pedir para agendar dia 20 de janeiro às 14h:
 "Perfeito! Vou agendar para dia 20 de janeiro às 14:00. Confirmo o agendamento!
 [AGENDAR: 2026-01-20 14:00 60 "João Silva" "Agendado via WhatsApp"]"
 
-Se o horário não estiver disponível, sugira alternativas baseadas na agenda.
-A data de hoje é: ${new Date().toLocaleDateString('pt-PT')}.`;
+Se o horário não estiver disponível, sugira alternativas baseadas na agenda.`;
 
         let systemPrompt = settings.systemPrompt || defaultPrompt;
+
+        // Sempre adicionar a data atual ao prompt (mesmo com prompt personalizado)
+        const hoje = new Date();
+        const dataInfo = `\n\nINFORMAÇÃO TEMPORAL IMPORTANTE:
+- Data de hoje: ${hoje.toLocaleDateString('pt-PT', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+- Dia da semana: ${hoje.toLocaleDateString('pt-PT', { weekday: 'long' })}
+- Amanhã será: ${new Date(hoje.getTime() + 24*60*60*1000).toLocaleDateString('pt-PT', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}`;
+        systemPrompt += dataInfo;
 
         // Buscar e adicionar conhecimento do utilizador (posts do feed + agenda)
         const knowledge = await getUserKnowledge(userId);
