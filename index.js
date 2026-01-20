@@ -375,7 +375,7 @@ Se o horário não estiver disponível, sugira alternativas baseadas na agenda.`
         // Adicionar contexto de conhecimento ao system prompt
         const fullContext = systemPrompt + knowledgeContext;
 
-        console.log(`[AI] Calling AI for user ${userId}, contact ${contactNumber} (knowledge: ${knowledge.posts.length} posts, ${knowledge.agenda.length} events)`);
+        console.log(`[AI] Calling AI for user ${userId}, contact ${contactNumber} (knowledge: ${knowledge.posts.length} posts, ${knowledge.appointments.length} appointments, ${knowledge.availableSlots.length} available slots)`);
 
         // Chamar Supabase Edge Function
         const response = await fetch(`${SUPABASE_FUNCTIONS_URL}/ask-claude`, {
