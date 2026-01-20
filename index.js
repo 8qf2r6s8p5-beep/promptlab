@@ -133,6 +133,8 @@ async function getUserAppointments(userId) {
  * Buscar slots de disponibilidade da tabela agenda_availability
  * Retorna APENAS os horários marcados como DISPONÍVEIS
  * O AI SÓ pode agendar em horários explicitamente marcados como disponíveis
+ *
+ * Estrutura da tabela: { date: 'YYYY-MM-DD', slots: [{hour: number, available: boolean}, ...] }
  */
 async function getUserAvailableSlots(userId) {
     try {
@@ -148,7 +150,7 @@ async function getUserAvailableSlots(userId) {
 
         const { data, error } = await supabase
             .from('agenda_availability')
-            .select('date, hour, available')
+            .select('date, slots')
             .eq('user_id', userId)
             .in('date', dates);
 
@@ -157,10 +159,25 @@ async function getUserAvailableSlots(userId) {
             return [];
         }
 
-        // Filtrar APENAS os horários marcados como DISPONÍVEIS (available = true)
-        const available = (data || []).filter(slot => slot.available === true);
+        // Extrair slots disponíveis do JSONB
+        // Cada row tem: { date: 'YYYY-MM-DD', slots: [{hour: 9, available: true}, {hour: 10, available: false}, ...] }
+        const availableSlots = [];
+        (data || []).forEach(row => {
+            if (row.slots && Array.isArray(row.slots)) {
+                row.slots.forEach(slot => {
+                    if (slot.available === true) {
+                        availableSlots.push({
+                            date: row.date,
+                            hour: slot.hour,
+                            available: true
+                        });
+                    }
+                });
+            }
+        });
 
-        return available;
+        console.log(`[AI] Parsed ${availableSlots.length} available slots from ${(data || []).length} days`);
+        return availableSlots;
     } catch (err) {
         console.error(`[AI] Error fetching availability slots:`, err);
         return [];
