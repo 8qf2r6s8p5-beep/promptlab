@@ -218,7 +218,26 @@ Exemplo: Se o cliente pedir para agendar dia 20 de janeiro às 14h:
 
 Se o horário não estiver disponível, sugira alternativas baseadas na agenda.`;
 
-        let systemPrompt = settings.systemPrompt || defaultPrompt;
+        // Instruções de agendamento - SEMPRE incluídas
+        const appointmentInstructions = `
+
+AGENDAMENTOS (IMPORTANTE - Siga este formato EXATAMENTE):
+Você pode agendar compromissos quando o cliente solicitar. Verifique a disponibilidade na agenda antes de confirmar.
+Para criar um agendamento, responda com o formato especial no FINAL da sua mensagem:
+[AGENDAR: YYYY-MM-DD HH:MM duração_minutos "Nome do Cliente" "notas opcionais"]
+
+Exemplo: Se o cliente pedir para agendar dia 20 de janeiro às 14h:
+"Perfeito! Vou agendar para dia 20 de janeiro às 14:00. Confirmo o agendamento!
+[AGENDAR: 2026-01-20 14:00 60 "João Silva" "Agendado via WhatsApp"]"
+
+ATENÇÃO: O formato [AGENDAR: ...] é OBRIGATÓRIO para criar agendamentos. Sem ele, o agendamento NÃO será criado.
+Se o horário não estiver disponível, sugira alternativas baseadas na agenda.`;
+
+        // Se tem prompt personalizado, usa-o + instruções de agendamento
+        // Se não tem, usa o default (que já inclui instruções)
+        let systemPrompt = settings.systemPrompt
+            ? settings.systemPrompt + appointmentInstructions
+            : defaultPrompt;
 
         // Sempre adicionar a data atual ao prompt (mesmo com prompt personalizado)
         const hoje = new Date();
