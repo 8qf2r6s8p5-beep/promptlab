@@ -170,14 +170,15 @@ async function getUserServices(userId) {
 }
 
 /**
- * Calcular slots de disponibilidade com granularidade de 5 MINUTOS
+ * Calcular slots de disponibilidade com granularidade de 10 MINUTOS
  *
  * LÓGICA:
- * - Slots de 5 em 5 minutos (00, 05, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55)
+ * - Slots de 10 em 10 minutos (00, 10, 20, 30, 40, 50)
+ * - Mais natural para clientes (evita horários estranhos como :05, :25, :35)
  * - Disponível = dentro do horário de funcionamento do dia específico E sem appointments marcados
  * - Usa horários por dia se configurados (Agenda Avançada), senão usa horário global
  * - Respeita os dias de trabalho configurados (working_days)
- * - Considera duração exata dos appointments (a cada 5 minutos)
+ * - Considera duração exata dos appointments
  * - Aplica buffer time entre agendamentos
  *
  * @param {string} userId - ID do utilizador
@@ -190,8 +191,8 @@ async function getUserAvailableSlots(userId, businessHours, appointments = []) {
         const weekFromNow = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
         const { open, close, hoursPerDay, workingDays, bufferTime = 15 } = businessHours;
 
-        // Granularidade de 5 minutos
-        const SLOT_GRANULARITY = 5;
+        // Granularidade de 10 minutos (horários mais naturais: :00, :10, :20, :30, :40, :50)
+        const SLOT_GRANULARITY = 10;
 
         // Gerar lista de datas para os próximos 7 dias
         const dates = [];
@@ -201,10 +202,10 @@ async function getUserAvailableSlots(userId, businessHours, appointments = []) {
             dates.push({ date: dateStr, dayOfWeek });
         }
 
-        console.log(`[AI] Calculating 5-min availability for user ${userId}, dates: ${dates.map(d => d.date).join(', ')}`);
+        console.log(`[AI] Calculating 10-min availability for user ${userId}, dates: ${dates.map(d => d.date).join(', ')}`);
         console.log(`[AI] Using per-day hours: ${hoursPerDay ? 'YES' : 'NO (global)'}, working days: ${workingDays ? JSON.stringify(workingDays) : 'all'}, bufferTime: ${bufferTime}min`);
 
-        // Criar mapa de slots de 5 minutos ocupados: { "2026-01-20:14:30": true }
+        // Criar mapa de slots de 10 minutos ocupados: { "2026-01-20:14:30": true }
         const occupiedSlots = {};
         (appointments || []).forEach(apt => {
             if (!apt.date || !apt.start_time) return;
@@ -217,7 +218,7 @@ async function getUserAvailableSlots(userId, businessHours, appointments = []) {
             // Duração total = duração do serviço + buffer time
             const totalBlockedTime = duration + bufferTime;
 
-            // Marcar todos os slots de 5 min ocupados pelo appointment + buffer
+            // Marcar todos os slots de 10 min ocupados pelo appointment + buffer
             for (let m = 0; m < totalBlockedTime; m += SLOT_GRANULARITY) {
                 const slotMinutes = startInMinutes + m;
                 const hour = Math.floor(slotMinutes / 60);
@@ -227,9 +228,9 @@ async function getUserAvailableSlots(userId, businessHours, appointments = []) {
             }
         });
 
-        console.log(`[AI] Occupied 5-min slots from appointments (with ${bufferTime}min buffer): ${Object.keys(occupiedSlots).length}`);
+        console.log(`[AI] Occupied 10-min slots from appointments (with ${bufferTime}min buffer): ${Object.keys(occupiedSlots).length}`);
 
-        // Gerar todos os slots disponíveis de 5 em 5 minutos
+        // Gerar todos os slots disponíveis de 10 em 10 minutos
         const availableSlots = [];
         const currentTime = now.getTime();
 
@@ -248,7 +249,7 @@ async function getUserAvailableSlots(userId, businessHours, appointments = []) {
                 dayClose = hoursPerDay[dayOfWeek].close;
             }
 
-            // Gerar slots de 5 em 5 minutos para este dia
+            // Gerar slots de 10 em 10 minutos para este dia
             for (let hour = dayOpen; hour < dayClose; hour++) {
                 for (let minute = 0; minute < 60; minute += SLOT_GRANULARITY) {
                     const key = `${date}:${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
@@ -274,7 +275,7 @@ async function getUserAvailableSlots(userId, businessHours, appointments = []) {
             }
         });
 
-        console.log(`[AI] Found ${availableSlots.length} available 5-min slots`);
+        console.log(`[AI] Found ${availableSlots.length} available 10-min slots`);
         return availableSlots;
     } catch (err) {
         console.error(`[AI] Error calculating availability slots:`, err);
@@ -315,7 +316,7 @@ async function getUserKnowledge(userId) {
     };
 
     userKnowledgeCache.set(userId, knowledge);
-    console.log(`[AI] Knowledge cache updated for user ${userId}: ${posts.length} posts, ${appointments.length} appointments, ${availableSlots.length} 5-min slots, ${services.length} services`);
+    console.log(`[AI] Knowledge cache updated for user ${userId}: ${posts.length} posts, ${appointments.length} appointments, ${availableSlots.length} 10-min slots, ${services.length} services`);
 
     // Debug: mostrar alguns slots disponíveis
     if (availableSlots.length > 0) {
@@ -330,40 +331,37 @@ async function getUserKnowledge(userId) {
 
 /**
  * Formatar conhecimento para incluir no contexto da AI
- * Modo eficiência: usa apenas títulos e sumários para economizar tokens
+ * Linguagem simples e amigável (sem termos técnicos)
  *
- * IMPORTANTE:
- * - Slots agora são de 5 em 5 minutos
- * - Serviços incluem duração (para verificar se cabe no slot)
- * - Preços só informar se perguntarem
+ * IMPORTANTE: Só mostra intervalos com pelo menos 30 minutos disponíveis
+ * (intervalos pequenos não servem para nenhum serviço)
  */
 function formatKnowledgeContext(knowledge) {
     let context = '';
 
+    // Duração mínima útil = 30 min (serviço mais curto geralmente é 20-30 min)
+    const MIN_USEFUL_INTERVAL = 30;
+
     // Formatar SERVIÇOS disponíveis
     if (knowledge.services && knowledge.services.length > 0) {
-        context += `\n\n=== SERVIÇOS DISPONÍVEIS ===\n`;
-        context += `IMPORTANTE: Você DEVE perguntar qual serviço o cliente deseja ANTES de agendar.\n`;
-        context += `Use a duração do serviço para verificar se o horário tem espaço suficiente.\n`;
-        context += `Os preços são confidenciais - SÓ informe se o cliente perguntar diretamente.\n\n`;
+        context += `\n\n=== SERVIÇOS ===\n`;
+        context += `Pergunte qual serviço o cliente quer. Preços só se perguntarem.\n\n`;
         knowledge.services.forEach(service => {
-            context += `• ${service.name} - Duração: ${service.duration} minutos (Preço: ${service.price}€ - só informar se perguntarem)\n`;
+            context += `• ${service.name} (${service.duration} min) - ${service.price}€\n`;
         });
     }
 
     // Formatar horários de trabalho/disponibilidade
     if (knowledge.businessHours) {
         const { open, close } = knowledge.businessHours;
-        context += `\n\n=== HORÁRIO DE ATENDIMENTO ===\n`;
-        context += `Atendimento disponível das ${String(open).padStart(2, '0')}:00 às ${String(close).padStart(2, '0')}:00.\n`;
-        context += `NÃO agende fora deste horário. Se o cliente pedir horário fora do expediente, sugira alternativas dentro do horário de atendimento.\n`;
+        context += `\n\n=== HORÁRIO ===\n`;
+        context += `Atendemos das ${open}h às ${close}h.\n`;
     }
 
-    // Formatar posts do feed (modo eficiência - apenas título e sumário)
+    // Formatar posts do feed
     if (knowledge.posts && knowledge.posts.length > 0) {
-        context += '\n\n=== BASE DE CONHECIMENTO (Posts do Feed) ===\n';
-        context += `Total: ${knowledge.posts.length} posts\n\n`;
-        knowledge.posts.forEach((post, i) => {
+        context += '\n\n=== INFO DO NEGÓCIO ===\n';
+        knowledge.posts.forEach((post) => {
             context += `• ${post.title}`;
             if (post.summary) {
                 context += `: ${post.summary}`;
@@ -372,34 +370,39 @@ function formatKnowledgeContext(knowledge) {
         });
     }
 
-    // Formatar slots DISPONÍVEIS de 5 em 5 minutos
-    if (knowledge.availableSlots && knowledge.availableSlots.length > 0) {
-        context += '\n\n=== HORÁRIOS DISPONÍVEIS PARA AGENDAMENTO (Próximos 7 dias) ===\n';
-        context += 'REGRAS CRÍTICAS E OBRIGATÓRIAS:\n';
-        context += '1. PRIMEIRO pergunte qual SERVIÇO o cliente deseja\n';
-        context += '2. Use a duração do serviço para verificar se há slots consecutivos suficientes\n';
-        context += '3. Você SÓ pode sugerir/agendar nos horários EXATOS listados abaixo\n';
-        context += '4. Os slots são de 5 em 5 minutos - verifique se há slots consecutivos para a duração do serviço\n';
-        context += '5. NUNCA invente ou sugira horários que NÃO aparecem nesta lista\n';
-        context += '6. Se o cliente pedir um horário que não está na lista, diga que não está disponível\n\n';
+    // Função auxiliar para formatar hora
+    const formatTime = (timeStr) => {
+        return timeStr.replace(':00', 'h').replace(':30', 'h30').replace(':10', 'h10').replace(':20', 'h20').replace(':40', 'h40').replace(':50', 'h50');
+    };
 
-        // Agrupar por data e mostrar intervalos
+    // Calcular duração de um intervalo em minutos
+    const getIntervalDuration = (startTime, endTime) => {
+        const [sh, sm] = startTime.split(':').map(Number);
+        const [eh, em] = endTime.split(':').map(Number);
+        return (eh * 60 + em) - (sh * 60 + sm) + 10; // +10 porque o último slot também conta
+    };
+
+    // Formatar horários DISPONÍVEIS - só intervalos úteis (>=30 min)
+    if (knowledge.availableSlots && knowledge.availableSlots.length > 0) {
+        context += '\n\n=== HORÁRIOS DISPONÍVEIS ===\n';
+        context += 'Só pode agendar nestes horários. Se o cliente pedir um que não está na lista, diga que está ocupado e sugira alternativas.\n\n';
+
+        // Agrupar por data
         const byDate = {};
         knowledge.availableSlots.forEach(slot => {
             if (!byDate[slot.date]) byDate[slot.date] = [];
             byDate[slot.date].push(slot.time);
         });
 
-        // Para economizar tokens, mostrar apenas o primeiro e último slot de cada dia
-        // e indicar que são slots de 5 em 5 minutos
+        // Mostrar de forma simples - só intervalos >= 30 min
         Object.keys(byDate).sort().forEach(date => {
             if (byDate[date].length > 0) {
                 const dateObj = new Date(date);
-                const dateStr = dateObj.toLocaleDateString('pt-PT', { weekday: 'long', day: 'numeric', month: 'long' });
+                const dateStr = dateObj.toLocaleDateString('pt-PT', { weekday: 'short', day: 'numeric', month: 'short' });
                 const times = byDate[date].sort();
 
-                // Agrupar em intervalos contínuos para economizar tokens
-                const intervals = [];
+                // Agrupar em intervalos contínuos
+                const rawIntervals = [];
                 let intervalStart = times[0];
                 let lastTime = times[0];
 
@@ -408,23 +411,33 @@ function formatKnowledgeContext(knowledge) {
                     const [lh, lm] = lastTime.split(':').map(Number);
                     const diff = (h * 60 + m) - (lh * 60 + lm);
 
-                    if (diff > 5) {
-                        // Intervalo quebrou
-                        intervals.push(`${intervalStart}-${lastTime}`);
+                    if (diff > 10) {
+                        // Intervalo quebrou - guardar o anterior
+                        rawIntervals.push({ start: intervalStart, end: lastTime });
                         intervalStart = times[i];
                     }
                     lastTime = times[i];
                 }
-                intervals.push(`${intervalStart}-${lastTime}`);
+                rawIntervals.push({ start: intervalStart, end: lastTime });
 
-                context += `• ${dateStr}: ${intervals.join(', ')}\n`;
+                // Filtrar apenas intervalos com pelo menos 30 minutos
+                const usefulIntervals = rawIntervals.filter(interval => {
+                    const duration = getIntervalDuration(interval.start, interval.end);
+                    return duration >= MIN_USEFUL_INTERVAL;
+                });
+
+                // Se há intervalos úteis, mostrar
+                if (usefulIntervals.length > 0) {
+                    const formattedIntervals = usefulIntervals.map(interval =>
+                        `${formatTime(interval.start)}-${formatTime(interval.end)}`
+                    );
+                    context += `• ${dateStr}: ${formattedIntervals.join(', ')}\n`;
+                }
             }
         });
-
-        context += `\n(Slots disponíveis de 5 em 5 minutos dentro dos intervalos acima)\n`;
     } else {
         context += '\n\n=== DISPONIBILIDADE ===\n';
-        context += 'ATENÇÃO: Não há horários disponíveis na agenda. Informe o cliente que não há disponibilidade no momento e peça para entrar em contacto mais tarde ou ligar diretamente.\n';
+        context += 'Não há horários disponíveis de momento. Peça ao cliente para tentar mais tarde.\n';
     }
 
     return context;
@@ -452,57 +465,56 @@ async function getAIResponse(userId, contactNumber, userMessage, contactName = '
             history = history.slice(-MAX_HISTORY_MESSAGES);
         }
 
-        // Construir system prompt personalizado
-        const defaultPrompt = `Você é um assistente AI que responde mensagens WhatsApp em nome do utilizador.
-Mantenha respostas concisas e amigáveis, apropriadas para WhatsApp.
-Responda no mesmo idioma da mensagem recebida.
-Não use formatação markdown - apenas texto simples.
+        // Construir system prompt personalizado - AMIGÁVEL E DESCONTRAÍDO
+        const defaultPrompt = `Você é um assistente simpático e descontraído que responde mensagens WhatsApp em nome do utilizador.
 
-FLUXO DE AGENDAMENTO (OBRIGATÓRIO):
-1. PRIMEIRO: Pergunte qual SERVIÇO o cliente deseja (ex: "Qual serviço gostaria de agendar?")
-2. SEGUNDO: Após saber o serviço, verifique a duração do mesmo e os horários disponíveis
-3. TERCEIRO: Sugira horários que tenham slots consecutivos suficientes para a duração do serviço
-4. QUARTO: Confirme o agendamento usando o formato especial
+ESTILO DE COMUNICAÇÃO:
+- Seja amigável, caloroso e use emojis de forma natural 😊
+- Respostas curtas e diretas, como numa conversa normal de WhatsApp
+- Use linguagem casual e acolhedora
+- Responda no mesmo idioma da mensagem recebida
+- Não use formatação markdown - apenas texto simples
+- Exemplos de tom: "Olá! 👋", "Claro que sim! 😊", "Perfeito! ✨", "Boa escolha! 💈"
 
-PREÇOS: Só informe o preço se o cliente perguntar diretamente. Não ofereça esta informação espontaneamente.
+FLUXO DE AGENDAMENTO:
+1. Pergunte qual serviço o cliente deseja de forma simpática
+2. Após saber o serviço, sugira 2-3 horários disponíveis de forma clara e simples
+3. Confirme o agendamento de forma calorosa
 
-Para criar um agendamento, responda com o formato especial no FINAL da sua mensagem:
+PREÇOS: Só informe se o cliente perguntar diretamente.
+
+Para criar um agendamento, responda com o formato especial no FINAL:
 [AGENDAR: YYYY-MM-DD HH:MM duração_minutos "Nome do Cliente" "Serviço: nome do serviço"]
 
-Exemplo: Se o cliente quer um Corte de Cabelo (30 min) às 14:00:
-"Perfeito! Vou agendar o seu Corte de Cabelo para dia 20 de janeiro às 14:00.
+Exemplo:
+"Ótimo! Fica marcado o teu Corte de Cabelo para dia 20 às 14h! 💈✨
 [AGENDAR: 2026-01-20 14:00 30 "João Silva" "Serviço: Corte de Cabelo"]"
 
-IMPORTANTE: A duração no agendamento DEVE ser a duração do serviço escolhido, não um valor genérico.
-Se o horário não tiver espaço suficiente para o serviço, sugira alternativas.`;
+IMPORTANTE: A duração DEVE ser a duração do serviço escolhido.`;
 
-        // Instruções de agendamento - SEMPRE incluídas
+        // Instruções de agendamento - SEMPRE incluídas (mais simples e amigáveis)
         const appointmentInstructions = `
 
-INFORMAÇÃO DO CLIENTE ATUAL:
-- Nome do cliente: ${contactName}
-- Telefone: ${contactNumber}
+CLIENTE ATUAL: ${contactName} (${contactNumber})
 
-FLUXO DE AGENDAMENTO OBRIGATÓRIO:
-1. PRIMEIRO pergunte qual SERVIÇO o cliente deseja (se ainda não souber)
-2. Use a DURAÇÃO do serviço para verificar disponibilidade
-3. Verifique se há slots consecutivos de 5 min suficientes para a duração do serviço
-4. Só agende quando tiver serviço, data e hora confirmados
+COMO AGENDAR:
+1. Pergunte qual serviço deseja (se ainda não souber)
+2. Sugira 2-3 horários disponíveis de forma simples (ex: "Tenho disponível às 10h, 14h ou 16h 😊")
+3. Quando o cliente escolher, confirme com carinho
 
-Para criar um agendamento, use este formato no FINAL da sua mensagem:
-[AGENDAR: YYYY-MM-DD HH:MM duração_minutos "Nome do Cliente" "Serviço: nome do serviço"]
+FORMATO para criar agendamento (no FINAL da mensagem):
+[AGENDAR: YYYY-MM-DD HH:MM duração "Nome" "Serviço: nome"]
 
 IMPORTANTE:
-- Use o nome REAL do cliente (${contactName}) no agendamento
-- A duração DEVE ser a duração do serviço (não use 60 genérico)
-- Os slots são de 5 em 5 minutos (ex: 14:00, 14:05, 14:10, 14:15...)
+- Use o nome "${contactName}" no agendamento
+- A duração = duração do serviço escolhido
+- Horários disponíveis: :00, :10, :20, :30, :40, :50
 
-Exemplo para Corte de Cabelo (30 min):
-"Perfeito! Vou agendar o seu Corte de Cabelo para dia 20 de janeiro às 14:00.
+Exemplo:
+"Perfeito ${contactName}! 😊 Fica marcado o teu Corte para dia 20 às 14h! 💈✨
 [AGENDAR: 2026-01-20 14:00 30 "${contactName}" "Serviço: Corte de Cabelo"]"
 
-ATENÇÃO: O formato [AGENDAR: ...] é OBRIGATÓRIO para criar agendamentos. Sem ele, o agendamento NÃO será criado.
-Se o horário não tiver espaço para o serviço, sugira alternativas baseadas na agenda.`;
+O formato [AGENDAR: ...] é OBRIGATÓRIO para criar o agendamento.`;
 
         // Se tem prompt personalizado, usa-o + instruções de agendamento
         // Se não tem, usa o default (que já inclui instruções)
