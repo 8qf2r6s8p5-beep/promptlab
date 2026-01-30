@@ -441,7 +441,7 @@ class SchedulingEngine {
             const blocks = this.blockedRanges[dateStr];
             if (blocks && blocks.length > 0) {
                 if (!hasOccupied) {
-                    context += '🚫 HORÁRIOS OCUPADOS (NÃO AGENDAR!):\n';
+                    context += '🚫 HORÁRIOS OCUPADOS (verifica SOBREPOSIÇÃO!):\n';
                     hasOccupied = true;
                 }
                 const dayData = this.availableSlots[dateStr];
@@ -450,7 +450,39 @@ class SchedulingEngine {
                 context += `• ${dayLabel} (${dateStr}): ${blocksStr}\n`;
             }
         });
-        if (hasOccupied) context += '\n';
+        // Calcular e mostrar JANELAS LIVRES para ajudar o AI
+        if (hasOccupied) {
+            context += '\n✅ JANELAS LIVRES (aceita qualquer horário nestas ranges):\n';
+            Object.keys(this.blockedRanges).sort().slice(0, 3).forEach(dateStr => {
+                const blocks = this.blockedRanges[dateStr] || [];
+                const dayData = this.availableSlots[dateStr];
+                if (!dayData) return;
+
+                const dayLabel = dayData.dayName;
+                const openMins = dayData.hours.openMins;
+                const closeMins = dayData.hours.closeMins;
+
+                // Sort blocks by start time
+                const sorted = [...blocks].sort((a, b) => a.start - b.start);
+                const freeWindows = [];
+                let cursor = openMins;
+
+                for (const block of sorted) {
+                    if (block.start > cursor) {
+                        freeWindows.push(`${minutesToTime(cursor)}-${minutesToTime(block.start)}`);
+                    }
+                    cursor = Math.max(cursor, block.end);
+                }
+                if (cursor < closeMins) {
+                    freeWindows.push(`${minutesToTime(cursor)}-${minutesToTime(closeMins)}`);
+                }
+
+                if (freeWindows.length > 0) {
+                    context += `• ${dayLabel}: ${freeWindows.join(', ')}\n`;
+                }
+            });
+            context += '\n';
+        }
 
         // HORÁRIOS DISPONÍVEIS - v4.3 PRÉ-CALCULADO para cada serviço
         context += '✅ PRIMEIRO HORÁRIO LIVRE POR SERVIÇO:\n';
@@ -504,13 +536,23 @@ class SchedulingEngine {
             context += `\n🚷 DIAS FECHADOS: ${closedDays.join(', ')}\n`;
         }
 
-        // Instruções para o AI - v4.3 SIMPLIFICADO
-        context += `\n📋 REGRAS OBRIGATÓRIAS:
-1. USA APENAS os horários em "PRIMEIRO HORÁRIO LIVRE" - NÃO inventes outros!
-2. Se pedirem "lista/mostra/todos": "Tenho às [PRIMEIRO LIVRE]. Preferes outro horário?"
-3. Se pedirem "mais tarde/tarde/depois": "A que horas preferes?"
-4. PROIBIDO listar múltiplos horários - sugere apenas UM
-5. Respostas CURTAS (máximo 2 frases)
+        // Instruções para o AI - v4.7 EXEMPLOS CONCRETOS
+        context += `\n📋 COMO RESPONDER:
+
+EXEMPLO 1 - Cliente pede horário LIVRE:
+Cliente: "Pode ser às 8h?"
+Resposta: "Sim! Posso às 08:00. Confirmas?"
+
+EXEMPLO 2 - Cliente pede horário OCUPADO:
+Cliente: "Quero às 10h"
+Resposta: "Não tenho às 10h. Tenho às 08:00. Pode ser?"
+
+EXEMPLO 3 - Cliente pede outro horário LIVRE:
+Cliente: "E às 15h?"
+Resposta: "Sim! Tenho às 15h. Confirmas?"
+
+REGRA: Se horário NÃO sobrepõe OCUPADOS → aceita. Se SOBREPÕE → rejeita e sugere primeiro livre.
+Respostas CURTAS (2 frases), sem markdown.
 - Comando: [AGENDA_COMMAND]{"action":"add","date":"YYYY-MM-DD","start":"HH:MM","duration":X,"client":"NOME","notes":"SERVIÇO"}[/AGENDA_COMMAND]\n`;
 
         return context;
