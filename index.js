@@ -31,50 +31,6 @@ const CALENDAR_API_URL = 'https://calendario-production-003b.up.railway.app';
 const { TenantHelper } = require('./tenant-helper');
 const tenant = new TenantHelper(supabase);
 
-// Scheduling Engine - PARTILHADO com a app para consistência
-const { SchedulingEngine } = require('./scheduling-engine-server');
-
-// Cache de engines por userId
-const schedulingEngineCache = new Map();
-const SCHEDULING_ENGINE_CACHE_TTL = 60 * 1000; // 1 minuto
-
-/**
- * Obter ou criar SchedulingEngine para um userId
- * Usa cache para evitar reinicializar constantemente
- */
-async function getOrCreateSchedulingEngine(userId, forceRefresh = false) {
-    const cached = schedulingEngineCache.get(userId);
-    const now = Date.now();
-
-    // Se cache válido e não forçar refresh, retornar
-    if (cached && !forceRefresh && (now - cached.timestamp) < SCHEDULING_ENGINE_CACHE_TTL) {
-        return cached.engine;
-    }
-
-    // Se cache existe mas expirou, fazer refresh
-    if (cached && (now - cached.timestamp) >= SCHEDULING_ENGINE_CACHE_TTL) {
-        try {
-            await cached.engine.refresh();
-            cached.timestamp = now;
-            return cached.engine;
-        } catch (err) {
-            console.error(`[SCHEDULING] Error refreshing engine for ${userId}:`, err.message);
-        }
-    }
-
-    // Criar novo engine
-    console.log(`[SCHEDULING] Creating new engine for user ${userId}`);
-    const engine = new SchedulingEngine(supabase);
-    await engine.initialize(userId);
-
-    schedulingEngineCache.set(userId, {
-        engine,
-        timestamp: now
-    });
-
-    return engine;
-}
-
 // Inicializar Express
 const app = express();
 
@@ -1179,45 +1135,7 @@ Tu: "Domingo às 18h está disponível!" ← ERRO! Não perguntou o serviço pri
 - Amanhã será: ${new Date(hoje.getTime() + 24*60*60*1000).toLocaleDateString('pt-PT', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}`;
         systemPrompt += dataInfo;
 
-        // SEMPRE invalidar cache quando conversa é sobre agendamentos
-        // Lista expandida de keywords que indicam contexto de agendamento
-        const availabilityKeywords = [
-            // Disponibilidade
-            'disponível', 'disponivel', 'livre', 'vaga', 'vagas',
-            // Horários
-            'horário', 'horario', 'hora', 'horas', 'às', 'as ',
-            // Ações
-            'marcar', 'agendar', 'reservar', 'booking', 'marcação',
-            // Tempo
-            'hoje', 'amanhã', 'amanha', 'domingo', 'segunda', 'terça', 'terca',
-            'quarta', 'quinta', 'sexta', 'sábado', 'sabado', 'semana',
-            // Serviços/Planos
-            'plano', 'serviço', 'servico', 'tratamento', 'sessão', 'sessao',
-            // Confirmações
-            'pode ser', 'sim', 'confirmo', 'quero', 'prefiro', 'escolho',
-            // Números de hora
-            '10h', '11h', '12h', '13h', '14h', '15h', '16h', '17h', '18h', '19h', '20h',
-            ':00', ':10', ':20', ':30', ':40', ':50'
-        ];
-        const asksAboutAvailability = availabilityKeywords.some(kw =>
-            userMessage.toLowerCase().includes(kw.toLowerCase())
-        );
-
-        // Invalidar cache para ter dados SEMPRE frescos em contexto de agendamento
-        if (asksAboutAvailability) {
-            console.log(`[AI] Appointment context detected - invalidating cache for fresh data`);
-            userKnowledgeCache.delete(userId);
-            schedulingEngineCache.delete(userId); // Também invalidar engine cache
-        }
-
-        // =====================================================
-        // CONTEXTO PARTILHADO COM A APP (SchedulingEngine)
-        // =====================================================
-        // Usar o SchedulingEngine para gerar contexto IDENTICO à app
-        const engine = await getOrCreateSchedulingEngine(userId, asksAboutAvailability);
-        const schedulingContext = engine.generateAIContext();
-
-        // Buscar posts do feed (não incluídos no SchedulingEngine)
+        // Buscar posts do feed para contexto
         const posts = await getUserFeedPosts(userId);
         let postsContext = '';
         if (posts && posts.length > 0) {
@@ -1229,10 +1147,10 @@ Tu: "Domingo às 18h está disponível!" ← ERRO! Não perguntou o serviço pri
             });
         }
 
-        // Combinar contextos: system prompt + scheduling (partilhado) + posts
-        const fullContext = systemPrompt + schedulingContext + postsContext;
+        // Combinar contextos: system prompt + posts
+        const fullContext = systemPrompt + postsContext;
 
-        console.log(`[AI] Calling AI for user ${userId}, contact ${contactNumber} (using shared SchedulingEngine, ${posts.length} posts)`);
+        console.log(`[AI] Calling AI for user ${userId}, contact ${contactNumber} (${posts.length} posts)`);
 
         // Chamar Supabase Edge Function
         const response = await fetch(`${SUPABASE_FUNCTIONS_URL}/ask-claude`, {
@@ -1256,98 +1174,7 @@ Tu: "Domingo às 18h está disponível!" ← ERRO! Não perguntou o serviço pri
             return null;
         }
 
-        let aiReply = data.reply;
-
-        // Verificar se a AI quer criar um agendamento
-        const appointmentMatch = aiReply.match(/\[AGENDAR:\s*(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})\s+(\d+)\s+"([^"]+)"(?:\s+"([^"]*)")?\]/);
-        if (appointmentMatch) {
-            const [fullMatch, date, time, duration, clientName, notes] = appointmentMatch;
-            console.log(`[AI] Detected appointment request: ${date} ${time} for ${clientName}`);
-
-            // Verificar disponibilidade e criar agendamento
-            const isAvailable = await checkAvailability(userId, date, time, parseInt(duration));
-            if (isAvailable) {
-                const appointment = await createAppointment(userId, {
-                    date,
-                    start: time,
-                    duration: parseInt(duration),
-                    client: clientName,
-                    phone: contactNumber,
-                    notes: notes || 'Agendado via WhatsApp AI'
-                });
-
-                if (appointment) {
-                    console.log(`[AI] Appointment created successfully: ${appointment.id}`);
-                    // Remover o comando da resposta visível
-                    aiReply = aiReply.replace(fullMatch, '').trim();
-                } else {
-                    // Falhou ao criar, remover comando e avisar
-                    aiReply = aiReply.replace(fullMatch, '(Houve um erro ao criar o agendamento. Por favor tente novamente.)').trim();
-                }
-            } else {
-                // Horário não disponível - Procurar alternativas inteligentes
-                console.log(`[AI] Time slot not available: ${date} ${time}`);
-
-                // Buscar slots alternativos
-                const alternatives = await findAlternativeSlots(userId, date, time, parseInt(duration));
-
-                // Formatar a hora para exibição (ex: 16:30 -> 16h30)
-                const formattedTime = time.replace(':', 'h');
-                const formattedDate = formatDateForDisplay(date);
-
-                // Construir mensagem com sugestões inteligentes
-                let suggestionParts = [];
-
-                // Prioridade 1: Sugestões do mesmo dia
-                if (alternatives.sameDayBefore || alternatives.sameDayAfter) {
-                    const sameDaySuggestions = [];
-                    if (alternatives.sameDayBefore) {
-                        sameDaySuggestions.push(alternatives.sameDayBefore.time.replace(':', 'h'));
-                    }
-                    if (alternatives.sameDayAfter) {
-                        sameDaySuggestions.push(alternatives.sameDayAfter.time.replace(':', 'h'));
-                    }
-
-                    if (sameDaySuggestions.length === 1) {
-                        suggestionParts.push(`Mas tenho disponível às ${sameDaySuggestions[0]} ${formattedDate}! 😊`);
-                    } else {
-                        suggestionParts.push(`Mas tenho disponível às ${sameDaySuggestions.join(' ou às ')} ${formattedDate}! 😊`);
-                    }
-                }
-
-                // Prioridade 2: Se não há no mesmo dia, sugerir próximo dia
-                if (!alternatives.sameDayBefore && !alternatives.sameDayAfter) {
-                    const nextDaySuggestions = [];
-
-                    if (alternatives.nextDayFirstHour) {
-                        const nextDayFormatted = formatDateForDisplay(alternatives.nextDayFirstHour.date);
-                        const timeFormatted = alternatives.nextDayFirstHour.time.replace(':', 'h');
-                        nextDaySuggestions.push(`${timeFormatted} ${nextDayFormatted}`);
-                    }
-
-                    if (alternatives.nextDayRequestedTime &&
-                        (!alternatives.nextDayFirstHour ||
-                         alternatives.nextDayRequestedTime.time !== alternatives.nextDayFirstHour.time)) {
-                        const nextDayFormatted = formatDateForDisplay(alternatives.nextDayRequestedTime.date);
-                        const timeFormatted = alternatives.nextDayRequestedTime.time.replace(':', 'h');
-                        nextDaySuggestions.push(`${timeFormatted} ${nextDayFormatted}`);
-                    }
-
-                    if (nextDaySuggestions.length > 0) {
-                        suggestionParts.push(`Infelizmente ${formattedDate} está sem vagas. Mas tenho disponível às ${nextDaySuggestions.join(' ou às ')}! 😊`);
-                    } else {
-                        suggestionParts.push(`Por favor, pergunta-me quais horários tenho livres! 😊`);
-                    }
-                }
-
-                // Substituir TODA a resposta para evitar confusão
-                if (suggestionParts.length > 0) {
-                    aiReply = `Peço desculpa, mas o horário das ${formattedTime} de ${formattedDate} já não está disponível. 😔\n\n${suggestionParts.join('\n\n')}\n\nQual preferes?`;
-                } else {
-                    aiReply = `Peço desculpa, mas o horário das ${formattedTime} de ${formattedDate} já não está disponível. 😔\n\nPor favor, escolhe outro horário dos que te sugeri anteriormente, ou pergunta-me quais horários tenho livres! 😊`;
-                }
-            }
-        }
+        const aiReply = data.reply;
 
         // Adicionar resposta da AI ao histórico
         history.push({ role: 'assistant', content: aiReply });
